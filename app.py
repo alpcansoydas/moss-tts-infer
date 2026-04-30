@@ -2876,7 +2876,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         dest="attn_implementation",
         type=str,
         default="auto",
-        choices=["auto", "sdpa", "eager"],
+        choices=["auto", "sdpa", "flash_attention_2", "eager"],
     )
     parser.add_argument("--host", type=str, default="localhost")
     parser.add_argument("--port", type=int, default=18083)
