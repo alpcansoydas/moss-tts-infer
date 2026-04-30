@@ -769,6 +769,21 @@ def _render_index_html(
     .top-tab:disabled {
       opacity: 1;
     }
+    .selection-card {
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 10px;
+      background: linear-gradient(180deg, #ffffff 0%, #f7f9ff 100%);
+    }
+    .selection-card + .selection-card {
+      margin-top: 11px;
+    }
+    .selection-card .field {
+      margin-bottom: 0;
+    }
+    .selection-card .meta {
+      margin-top: 8px;
+    }
     .grid {
       display: grid;
       grid-template-columns: minmax(0, 1.08fr) minmax(320px, 0.92fr);
@@ -867,7 +882,9 @@ def _render_index_html(
     #prompt-audio-preview {
       margin-top: 0;
     }
-    #prompt-audio-upload[hidden],
+    #prompt-audio-upload {
+      display: none;
+    }
     #prompt-audio-preview[hidden] {
       display: none;
     }
@@ -1055,27 +1072,33 @@ def _render_index_html(
         <li><strong>Voice Presets</strong> - Choose built-in demos from <code>assets/demo.jsonl</code>.</li>
       </ul>
       <p class="build-note">Built with <a href="https://github.com/OpenMOSS/MOSS-TTS-Nano" target="_blank" rel="noopener noreferrer">MOSS-TTS-Nano</a>.</p>
-      <div class="top-tabs" role="tablist" aria-label="Demo mode">
-        <button class="top-tab active" type="button" aria-selected="true">Voice Clone</button>
+      <div class="top-tabs" role="list" aria-label="Available demo controls">
+        <span class="top-tab active" role="listitem">Voice Clone</span>
+        <span class="top-tab active" role="listitem">Voice Presets</span>
       </div>
     </div>
 
     <div class="grid">
       <div class="panel input-panel">
-        <div class="field">
-          <label for="demo">Demo</label>
-          <select id="demo"></select>
+        <div class="selection-card">
+          <div class="field">
+            <label for="demo">Voice Preset</label>
+            <select id="demo"></select>
+          </div>
+          <div class="meta">Choose a built-in preset, or upload your own reference audio below for voice cloning.</div>
         </div>
 
-        <div class="field">
-          <label for="prompt-audio-upload">Prompt Speech</label>
-          <div class="prompt-audio-box">
-            <input id="prompt-audio-upload" type="file" accept="audio/*,.wav,.mp3,.flac,.m4a,.ogg,.opus,.aac">
-            <audio id="prompt-audio-preview" controls hidden></audio>
-            <div id="prompt-audio-source" class="meta">Using the selected demo prompt speech.</div>
-            <div class="prompt-audio-actions">
-              <button id="choose-prompt-audio-btn" class="secondary" type="button" hidden>选择文件</button>
-              <button id="clear-prompt-audio-btn" class="secondary" type="button" hidden>使用 Demo 音频</button>
+        <div class="selection-card">
+          <div class="field">
+            <label for="prompt-audio-upload">Voice Cloning Reference</label>
+            <div class="prompt-audio-box">
+              <input id="prompt-audio-upload" type="file" accept="audio/*,.wav,.mp3,.flac,.m4a,.ogg,.opus,.aac">
+              <audio id="prompt-audio-preview" controls hidden></audio>
+              <div id="prompt-audio-source" class="meta">Using the selected preset reference audio.</div>
+              <div class="prompt-audio-actions">
+                <button id="choose-prompt-audio-btn" class="secondary" type="button">Upload Reference Audio</button>
+                <button id="clear-prompt-audio-btn" class="secondary" type="button" hidden>Use Selected Preset Audio</button>
+              </div>
             </div>
           </div>
         </div>
@@ -1314,13 +1337,12 @@ def _render_index_html(
       return `${APP_BASE}/api/demo-prompt-audio/${encodeURIComponent(demoId)}`;
     }
 
-    function showPromptAudioFilePicker(message = "选择文件 | 未选择任何文件") {
+    function showPromptAudioFilePicker(message = "Upload a reference audio file for voice cloning.") {
       promptAudioPreview.pause();
       promptAudioPreview.removeAttribute("src");
       promptAudioPreview.load();
       promptAudioPreview.hidden = true;
-      promptAudioUploadInput.hidden = false;
-      choosePromptAudioBtn.hidden = true;
+      choosePromptAudioBtn.hidden = false;
       clearPromptAudioBtn.hidden = true;
       promptAudioSource.textContent = message;
     }
@@ -1332,7 +1354,6 @@ def _render_index_html(
     }) {
       promptAudioPreview.src = sourceUrl;
       promptAudioPreview.hidden = false;
-      promptAudioUploadInput.hidden = true;
       choosePromptAudioBtn.hidden = false;
       clearPromptAudioBtn.hidden = !showResetToDemo;
       promptAudioSource.textContent = message;
@@ -1345,7 +1366,7 @@ def _render_index_html(
         currentPromptAudioPreviewUrl = URL.createObjectURL(uploadedPromptAudio);
         showPromptAudioPreview({
           sourceUrl: currentPromptAudioPreviewUrl,
-          message: `Using uploaded prompt speech: ${uploadedPromptAudio.name}`,
+          message: `Using uploaded reference audio: ${uploadedPromptAudio.name}`,
           showResetToDemo: true,
         });
         return;
@@ -1357,8 +1378,8 @@ def _render_index_html(
         showPromptAudioPreview({
           sourceUrl: getDemoPromptAudioUrl(demo.id),
           message: demo.prompt_speech
-            ? `Using demo prompt speech: ${demo.prompt_speech}`
-            : "Using demo prompt speech.",
+            ? `Using selected preset reference audio: ${demo.prompt_speech}`
+            : "Using selected preset reference audio.",
           showResetToDemo: false,
         });
         return;

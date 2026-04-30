@@ -4,6 +4,7 @@ python-multipart>=0.0.9
 sentencepiece>=0.1.99
 torch==2.7.0
 torchaudio==2.7.0
+torchvision==0.22.0
 transformers==4.57.1
 sentencepiece
 uvicorn>=0.29.0
