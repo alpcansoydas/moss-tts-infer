@@ -2868,7 +2868,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         default=str(DEFAULT_AUDIO_TOKENIZER_PATH),
     )
     parser.add_argument("--output-dir", "--output_dir", dest="output_dir", type=str, default=str(DEFAULT_OUTPUT_DIR))
-    parser.add_argument("--device", type=str, default="cpu", choices=["cpu", "auto"])
+    parser.add_argument("--device", type=str, default="auto", choices=["cpu", "cuda", "auto"])
     parser.add_argument("--dtype", type=str, default="auto", choices=["auto", "float32", "float16", "bfloat16"])
     parser.add_argument(
         "--attn-implementation",
@@ -2888,9 +2888,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         level=logging.INFO,
     )
 
-    resolved_runtime_device = "cpu"
-    if args.device != "cpu":
-        logging.info("CPU-only app mode: ignoring --device=%s and forcing cpu.", args.device)
+    resolved_runtime_device = args.device
 
     runtime = NanoTTSService(
         checkpoint_path=args.checkpoint_path,
