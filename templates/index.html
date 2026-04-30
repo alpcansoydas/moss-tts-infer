@@ -1079,82 +1079,104 @@
       return Math.max(0.0, rawValue);
     }
 
-    const MIN_SCHEDULE_FRAMES = 4096;
-    let pcmAccumulator = new Uint8Array(0);
-    let pcmAccumulatorChannels = 1;
-    let pcmAccumulatorSampleRate = 24000;
+    const RING_BUFFER_SECONDS = 30;
+    let workletNode = null;
+    let totalScheduledFrames = 0;
 
-    function resetPcmAccumulator(sampleRate, channels) {
-      pcmAccumulator = new Uint8Array(0);
-      pcmAccumulatorChannels = channels;
-      pcmAccumulatorSampleRate = sampleRate;
-    }
-
-    function schedulePcmBuffer(pcmBytes) {
-      if (!currentAudioContext || pcmBytes.byteLength <= 0) {
-        return;
+    const WORKLET_CODE = `
+class PCMStreamProcessor extends AudioWorkletProcessor {
+  constructor(options) {
+    super();
+    const bufLen = (options.processorOptions && options.processorOptions.ringBufferSize) || 131072;
+    this._buf = new Float32Array(bufLen);
+    this._channels = (options.processorOptions && options.processorOptions.channels) || 1;
+    this._rd = 0;
+    this._wr = 0;
+    this._len = bufLen;
+    this._done = false;
+    this.port.onmessage = (e) => {
+      if (e.data === null) { this._done = true; return; }
+      const samples = e.data;
+      for (let i = 0; i < samples.length; i++) {
+        this._buf[this._wr] = samples[i];
+        this._wr = (this._wr + 1) % this._len;
       }
-      const channels = pcmAccumulatorChannels;
-      const sampleRate = pcmAccumulatorSampleRate;
-      const bytesPerFrame = channels * 2;
-      const totalFrames = Math.floor(pcmBytes.byteLength / bytesPerFrame);
-      if (totalFrames <= 0) {
-        return;
-      }
-
-      const audioBuffer = currentAudioContext.createBuffer(channels, totalFrames, sampleRate);
-      const view = new DataView(pcmBytes.buffer, pcmBytes.byteOffset, totalFrames * bytesPerFrame);
-      for (let channelIndex = 0; channelIndex < channels; channelIndex += 1) {
-        const channelData = audioBuffer.getChannelData(channelIndex);
-        for (let frameIndex = 0; frameIndex < totalFrames; frameIndex += 1) {
-          const byteOffset = (frameIndex * channels + channelIndex) * 2;
-          channelData[frameIndex] = view.getInt16(byteOffset, true) / 32768.0;
+    };
+  }
+  process(inputs, outputs) {
+    const out = outputs[0];
+    const ch = Math.min(this._channels, out.length);
+    const frames = out[0].length;
+    for (let f = 0; f < frames; f++) {
+      for (let c = 0; c < ch; c++) {
+        if (this._rd !== this._wr) {
+          out[c][f] = this._buf[this._rd];
+          this._rd = (this._rd + 1) % this._len;
+        } else {
+          out[c][f] = 0;
         }
       }
+    }
+    if (this._done && this._rd === this._wr) return false;
+    return true;
+  }
+}
+registerProcessor('pcm-stream-processor', PCMStreamProcessor);
+`;
 
-      const source = currentAudioContext.createBufferSource();
-      source.buffer = audioBuffer;
-      source.connect(currentAudioContext.destination);
-      const now = currentAudioContext.currentTime;
-      const startAt = Math.max(nextPlaybackTime || (now + currentInitialPlaybackDelaySeconds), now + 0.005);
-      source.start(startAt);
-      const endAt = startAt + audioBuffer.duration;
-      nextPlaybackTime = endAt;
-      if (currentRealtimePlaybackStartAt === null) {
-        currentRealtimePlaybackStartAt = startAt;
+    const workletRegisteredContexts = new WeakSet();
+
+    async function ensureWorkletRegistered(audioCtx) {
+      if (workletRegisteredContexts.has(audioCtx)) return;
+      const blob = new Blob([WORKLET_CODE], { type: "application/javascript" });
+      const url = URL.createObjectURL(blob);
+      try {
+        await audioCtx.audioWorklet.addModule(url);
+      } finally {
+        URL.revokeObjectURL(url);
       }
-      currentRealtimePlaybackScheduledAudioSeconds = Math.max(
-        currentRealtimePlaybackScheduledAudioSeconds,
-        endAt - currentRealtimePlaybackStartAt
-      );
+      workletRegisteredContexts.add(audioCtx);
+    }
+
+    function createWorkletNode(audioCtx, channels) {
+      const ringBufferSize = Math.max(131072, audioCtx.sampleRate * RING_BUFFER_SECONDS * channels);
+      const node = new AudioWorkletNode(audioCtx, "pcm-stream-processor", {
+        numberOfInputs: 0,
+        numberOfOutputs: 1,
+        outputChannelCount: [channels],
+        processorOptions: { ringBufferSize, channels },
+      });
+      node.connect(audioCtx.destination);
+      return node;
     }
 
     function schedulePcmChunk(pcmChunk, sampleRate, channels) {
-      if (!currentAudioContext || pcmChunk.byteLength <= 0) {
+      if (!currentAudioContext || !workletNode || pcmChunk.byteLength <= 0) {
         return;
       }
-      pcmAccumulatorChannels = channels;
-      pcmAccumulatorSampleRate = sampleRate;
-      pcmAccumulator = mergeUint8Arrays(pcmAccumulator, pcmChunk);
-
       const bytesPerFrame = channels * 2;
-      const accumulatedFrames = Math.floor(pcmAccumulator.length / bytesPerFrame);
-      if (accumulatedFrames >= MIN_SCHEDULE_FRAMES) {
-        const alignedLength = accumulatedFrames * bytesPerFrame;
-        schedulePcmBuffer(pcmAccumulator.subarray(0, alignedLength));
-        pcmAccumulator = pcmAccumulator.subarray(alignedLength);
+      const totalFrames = Math.floor(pcmChunk.byteLength / bytesPerFrame);
+      if (totalFrames <= 0) return;
+
+      const samples = new Float32Array(totalFrames * channels);
+      const view = new DataView(pcmChunk.buffer, pcmChunk.byteOffset, totalFrames * bytesPerFrame);
+      for (let f = 0; f < totalFrames; f++) {
+        for (let c = 0; c < channels; c++) {
+          samples[f * channels + c] = view.getInt16((f * channels + c) * 2, true) / 32768.0;
+        }
       }
+      workletNode.port.postMessage(samples, [samples.buffer]);
+
+      totalScheduledFrames += totalFrames;
+      const scheduledSeconds = totalScheduledFrames / sampleRate;
+      if (currentRealtimePlaybackStartAt === null) {
+        currentRealtimePlaybackStartAt = currentAudioContext.currentTime + currentInitialPlaybackDelaySeconds;
+      }
+      currentRealtimePlaybackScheduledAudioSeconds = scheduledSeconds;
+      nextPlaybackTime = currentRealtimePlaybackStartAt + scheduledSeconds;
     }
 
     function flushPcmAccumulator() {
-      if (pcmAccumulator.length > 0) {
-        const bytesPerFrame = pcmAccumulatorChannels * 2;
-        const alignedLength = Math.floor(pcmAccumulator.length / bytesPerFrame) * bytesPerFrame;
-        if (alignedLength > 0) {
-          schedulePcmBuffer(pcmAccumulator.subarray(0, alignedLength));
-        }
-        pcmAccumulator = new Uint8Array(0);
-      }
     }
 
     function clearRealtimePlaybackCompletionTimer() {
@@ -1192,6 +1214,10 @@
         }
 
         setPlaybackHighlight(null, { markAllPlayed: true });
+        if (workletNode) {
+          try { workletNode.disconnect(); } catch (_) {}
+          workletNode = null;
+        }
         try {
           await currentAudioContext.close();
         } catch (error) {
@@ -1199,6 +1225,7 @@
         currentAudioContext = null;
         currentRealtimePlaybackPaused = false;
         nextPlaybackTime = 0;
+        totalScheduledFrames = 0;
         resetRealtimePlaybackTracking();
         updatePauseButtonState();
       }
@@ -1224,6 +1251,11 @@
         }).catch(() => {});
         currentStreamId = null;
       }
+      if (workletNode) {
+        try { workletNode.port.postMessage(null); } catch (_) {}
+        try { workletNode.disconnect(); } catch (_) {}
+        workletNode = null;
+      }
       if (currentAudioContext) {
         try {
           await currentAudioContext.close();
@@ -1232,9 +1264,9 @@
         currentAudioContext = null;
       }
       nextPlaybackTime = 0;
+      totalScheduledFrames = 0;
       currentRealtimePlaybackPaused = false;
       resetRealtimePlaybackTracking();
-      resetPcmAccumulator(24000, 1);
       currentPlaybackMarkedComplete = false;
       setPlaybackHighlight(null);
       updatePauseButtonState();
@@ -1316,11 +1348,10 @@
       await currentAudioContext.resume();
       nextPlaybackTime = currentAudioContext.currentTime + currentInitialPlaybackDelaySeconds;
       currentRealtimePlaybackPaused = false;
+      totalScheduledFrames = 0;
       resetRealtimePlaybackTracking();
-      resetPcmAccumulator(
-        Number(startData.sample_rate || 48000),
-        Number(startData.channels || 2)
-      );
+      await ensureWorkletRegistered(currentAudioContext);
+      workletNode = createWorkletNode(currentAudioContext, Number(startData.channels || 1));
       clearRealtimePlaybackCompletionTimer();
       updatePauseButtonState();
       currentStreamAbortController = new AbortController();
@@ -1392,7 +1423,6 @@
       if (remainder.length > 0) {
         schedulePcmChunk(remainder, sampleRate, channels);
       }
-      flushPcmAccumulator();
 
       await updateStreamStatus();
       if (currentStreamStatusTimer) {
